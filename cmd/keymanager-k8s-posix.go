@@ -2,10 +2,11 @@ package cmd
 
 import (
 	"context"
+	"crypto"
 	"flag"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 
 	logr "github.com/sirupsen/logrus"
 
@@ -13,10 +14,17 @@ import (
 	rest "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	keymanagerv1 "github.com/accuknox/spire-plugin-sdk/proto/spire/plugin/agent/keymanager/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
+
+// KeyEntry is an entry maintained by the key manager
+type KeyEntry struct {
+	PrivateKey crypto.Signer
+	*keymanagerv1.PublicKey
+}
 
 var parsed bool = false
 var kubeconfig *string
@@ -95,7 +103,7 @@ func ConnectInClusterAPIClient() *kubernetes.Clientset {
 		port = "6443"
 	}
 
-	read, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	read, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 	if err != nil {
 		logr.WithError(err).Error("Failed to read token")
 		return nil
@@ -120,7 +128,7 @@ func ConnectInClusterAPIClient() *kubernetes.Clientset {
 	}
 }
 
-func CreateK8sSecrets(secretname, namespace string, jsonBytes []byte) error {
+func CreateK8sSecrets(namespace, secretname string, jsonBytes []byte) error {
 
 	client := ConnectK8sClient()
 
@@ -134,23 +142,38 @@ func CreateK8sSecrets(secretname, namespace string, jsonBytes []byte) error {
 		Type: v1.SecretTypeOpaque,
 	}
 
-	_, err := client.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
+	oldSec, err := GetK8sSecrets(namespace, secretname)
+	if err == nil {
+		oldSec.Data[secretname] = jsonBytes
+		_, err := client.CoreV1().Secrets(namespace).Update(context.Background(), &oldSec, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err = client.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 
-	if err != nil {
-		return err
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func GetK8sSecrets(secretname, namespace string) (v1.Secret, error) {
+func GetK8sSecrets(namespace, secretname string) (v1.Secret, error) {
 	client := ConnectK8sClient()
 	secret, err := client.CoreV1().Secrets(namespace).Get(context.Background(), secretname, metav1.GetOptions{})
 	return *secret, err
 }
 
-func DeleteSVIDSecret(secretname, namespace string) error {
+func DeleteSVIDSecret(namespace, secretname string) error {
 	client := ConnectK8sClient()
 	return client.CoreV1().Secrets(namespace).Delete(context.Background(), secretname, metav1.DeleteOptions{})
 
+}
+
+func SortKeyEntries(entries []*KeyEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Id < entries[j].Id
+	})
 }
